@@ -1,45 +1,53 @@
-#
-# Makefile
-#
-#CC ?= gcc
-CC := arm-buildroot-linux-gnueabihf-gcc
-LVGL_DIR_NAME ?= lvgl
-LVGL_DIR ?= ${shell pwd}
-CFLAGS ?= -O3 -g0 -I$(LVGL_DIR)/ -Wall -Wshadow -Wundef -Wmissing-prototypes -Wno-discarded-qualifiers -Wall -Wextra -Wno-unused-function -Wno-error=strict-prototypes -Wpointer-arith -fno-strict-aliasing -Wno-error=cpp -Wuninitialized -Wmaybe-uninitialized -Wno-unused-parameter -Wno-missing-field-initializers -Wtype-limits -Wsizeof-pointer-memaccess -Wno-format-nonliteral -Wno-cast-qual -Wunreachable-code -Wno-switch-default -Wreturn-type -Wmultichar -Wformat-security -Wno-ignored-qualifiers -Wno-error=pedantic -Wno-sign-compare -Wno-error=missing-prototypes -Wdouble-promotion -Wclobbered -Wdeprecated -Wempty-body -Wtype-limits -Wshift-negative-value -Wstack-usage=2048 -Wno-unused-value -Wno-unused-parameter -Wno-missing-field-initializers -Wuninitialized -Wmaybe-uninitialized -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wtype-limits -Wsizeof-pointer-memaccess -Wno-format-nonliteral -Wpointer-arith -Wno-cast-qual -Wmissing-prototypes -Wunreachable-code -Wno-switch-default -Wreturn-type -Wmultichar -Wno-discarded-qualifiers -Wformat-security -Wno-ignored-qualifiers -Wno-sign-compare
-LDFLAGS ?= -lm -ljpeg -lpthread
-BIN = lv_100ask_camera_demo
+
+CROSS_COMPILE = arm-linux-gnueabihf-
+AS		= $(CROSS_COMPILE)as
+LD		= $(CROSS_COMPILE)ld
+CC		= $(CROSS_COMPILE)gcc
+CPP		= $(CC) -E
+AR		= $(CROSS_COMPILE)ar
+NM		= $(CROSS_COMPILE)nm
+
+STRIP		= $(CROSS_COMPILE)strip
+OBJCOPY		= $(CROSS_COMPILE)objcopy
+OBJDUMP		= $(CROSS_COMPILE)objdump
+
+export AS LD CC CPP AR NM
+export STRIP OBJCOPY OBJDUMP
+
+CFLAGS := -Wall -O2 -g
+CFLAGS += -I $(shell pwd)/include
+
+LDFLAGS := -lm -ljpeg
+
+export CFLAGS LDFLAGS
+
+TOPDIR := $(shell pwd)
+export TOPDIR
+
+TARGET := video2lcd
 
 
-#Collect the files to compile
-MAINSRC = ./main.c
+obj-y += main.o
+obj-y += convert/
+obj-y += display/
+obj-y += render/
+obj-y += video/
 
-include $(LVGL_DIR)/lvgl/lvgl.mk
-include $(LVGL_DIR)/lv_drivers/lv_drivers.mk
-include $(LVGL_DIR)/camera_100ask/camera_100ask.mk
+all : start_recursive_build $(TARGET)
+	@echo $(TARGET) has been built!
 
-CSRCS +=$(LVGL_DIR)/mouse_cursor_icon.c 
+start_recursive_build:
+	make -C ./ -f $(TOPDIR)/Makefile.build
 
-OBJEXT ?= .o
+$(TARGET) : start_recursive_build
+	$(CC) -o $(TARGET) built-in.o $(LDFLAGS)
 
-AOBJS = $(ASRCS:.S=$(OBJEXT))
-COBJS = $(CSRCS:.c=$(OBJEXT))
+clean:
+	rm -f $(shell find -name "*.o")
+	rm -f $(TARGET)
 
-MAINOBJ = $(MAINSRC:.c=$(OBJEXT))
-
-SRCS = $(ASRCS) $(CSRCS) $(MAINSRC)
-OBJS = $(AOBJS) $(COBJS)
-
-## MAINOBJ -> OBJFILES
-
-all: default
-
-%.o: %.c
-	@$(CC)  $(CFLAGS) -c $< -o $@
-	@echo "CC $<"
-    
-default: $(AOBJS) $(COBJS) $(MAINOBJ)
-	$(CC) -o $(BIN) $(MAINOBJ) $(AOBJS) $(COBJS) $(LDFLAGS)
-
-clean: 
-	rm -f $(BIN) $(AOBJS) $(COBJS) $(MAINOBJ)
-
+distclean:
+	rm -f $(shell find -name "*.o")
+	rm -f $(shell find -name "*.d")
+	rm -f $(TARGET)
+	

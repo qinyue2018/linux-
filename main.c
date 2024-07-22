@@ -1,95 +1,173 @@
-#include "lvgl/lvgl.h"
-#include "lv_drivers/display/fbdev.h"
-#include "lv_drivers/indev/evdev.h"
-
-#include <camera_100ask_dev.h>
-#include <camera_100ask_ui.h>
 #include <unistd.h>
-#include <pthread.h>
-#include <time.h>
-#include <sys/time.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <config.h>
+#include <disp_manager.h>
+#include <video_manager.h>
+#include <convert_manager.h>
+#include <render.h>
+#include <string.h>
 
-#define DISP_BUF_SIZE (1024 * 600)
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+
+
+/* video2lcd </dev/video0,1,...> */
 int main(int argc, char **argv)
-{
-    int iError;
+{	
+	int iError;
+    T_VideoDevice tVideoDevice;
+    PT_VideoConvert ptVideoConvert;
+    int iPixelFormatOfVideo;
+    int iPixelFormatOfDisp;
 
+    PT_VideoBuf ptVideoBufCur;
+    T_VideoBuf tVideoBuf;
+    T_VideoBuf tConvertBuf;
+    T_VideoBuf tZoomBuf;
+    T_VideoBuf tFrameBuf;
+    
+    int iLcdWidth;
+    int iLcdHeigt;
+    int iLcdBpp;
+
+    int iTopLeftX;
+    int iTopLeftY;
+
+    float k;
+    
     if (argc != 2)
     {
         printf("Usage:\n");
         printf("%s </dev/video0,1,...>\n", argv[0]);
         return -1;
     }
-
-    iError = camera_100ask_dev_init(argv[1]);
-    if(iError)  return;
-
-    /*LittlevGL init*/
-    lv_init();
-
-    /*Linux frame buffer device init*/
-    fbdev_init();
-
-    /*A small buffer for LittlevGL to draw the screen's content*/
-    static lv_color_t buf[DISP_BUF_SIZE];
-
-    /*Initialize a descriptor for the buffer*/
-    static lv_disp_draw_buf_t disp_buf;
-    lv_disp_draw_buf_init(&disp_buf, buf, NULL, DISP_BUF_SIZE);
-
-    /*Initialize and register a display driver*/
-    static lv_disp_drv_t disp_drv;
-    lv_disp_drv_init(&disp_drv);
-    disp_drv.draw_buf   = &disp_buf;
-    disp_drv.flush_cb   = fbdev_flush;
-    disp_drv.hor_res    = 1024;
-    disp_drv.ver_res    = 600;
-    lv_disp_drv_register(&disp_drv);
-
-    evdev_init();
-    static lv_indev_drv_t indev_drv_1;
-    lv_indev_drv_init(&indev_drv_1); /*Basic initialization*/
-    indev_drv_1.type = LV_INDEV_TYPE_POINTER;
-
-    /*This function will be called periodically (by the library) to get the mouse position and state*/
-    indev_drv_1.read_cb = evdev_read;
-    lv_indev_t *mouse_indev = lv_indev_drv_register(&indev_drv_1);
-
-    /*Set a cursor for the mouse*/
-    LV_IMG_DECLARE(mouse_cursor_icon)
-    lv_obj_t * cursor_obj = lv_img_create(lv_scr_act()); /*Create an image object for the cursor */
-    lv_img_set_src(cursor_obj, &mouse_cursor_icon);           /*Set the image source*/
-    lv_indev_set_cursor(mouse_indev, cursor_obj);             /*Connect the image  object to the driver*/
-
-    /*Create a Demo*/
-    camera_100ask_ui_init();
+    
     
 
-    /*Handle LitlevGL tasks (tickless mode)*/
-    while(1) {
-        lv_timer_handler();
-        usleep(5000);
+    /* 一系列的初始化 */
+	/* 注册显示设备 */
+	DisplayInit();
+	/* 可能可支持多个显示设备: 选择和初始化指定的显示设备 */
+	SelectAndInitDefaultDispDev("fb");
+    GetDispResolution(&iLcdWidth, &iLcdHeigt, &iLcdBpp);
+    GetVideoBufForDisplay(&tFrameBuf);
+    iPixelFormatOfDisp = tFrameBuf.iPixelFormat;
+
+    VideoInit();
+
+    iError = VideoDeviceInit(argv[1], &tVideoDevice);
+    if (iError)
+    {
+        DBG_PRINTF("VideoDeviceInit for %s error!\n", argv[1]);
+        return -1;
+    }
+    iPixelFormatOfVideo = tVideoDevice.ptOPr->GetFormat(&tVideoDevice);
+
+    VideoConvertInit();
+    ptVideoConvert = GetVideoConvertForFormats(iPixelFormatOfVideo, iPixelFormatOfDisp);
+    if (NULL == ptVideoConvert)
+    {
+        DBG_PRINTF("can not support this format convert\n");
+        return -1;
     }
 
-    return 0;
-}
 
-/*Set in lv_conf.h as `LV_TICK_CUSTOM_SYS_TIME_EXPR`*/
-uint32_t custom_tick_get(void)
-{
-    static uint64_t start_ms = 0;
-    if(start_ms == 0) {
-        struct timeval tv_start;
-        gettimeofday(&tv_start, NULL);
-        start_ms = (tv_start.tv_sec * 1000000 + tv_start.tv_usec) / 1000;
+    /* 启动摄像头设备 */
+    iError = tVideoDevice.ptOPr->StartDevice(&tVideoDevice);
+    if (iError)
+    {
+        DBG_PRINTF("StartDevice for %s error!\n", argv[1]);
+        return -1;
     }
 
-    struct timeval tv_now;
-    gettimeofday(&tv_now, NULL);
-    uint64_t now_ms;
-    now_ms = (tv_now.tv_sec * 1000000 + tv_now.tv_usec) / 1000;
+    memset(&tVideoBuf, 0, sizeof(tVideoBuf));
+    memset(&tConvertBuf, 0, sizeof(tConvertBuf));
+    tConvertBuf.iPixelFormat     = iPixelFormatOfDisp;
+    tConvertBuf.tPixelDatas.iBpp = iLcdBpp;
+    
+    
+    memset(&tZoomBuf, 0, sizeof(tZoomBuf));
+    
 
-    uint32_t time_ms = now_ms - start_ms;
-    return time_ms;
+    while (1)
+    {
+        /* 读入摄像头数据 */
+        iError = tVideoDevice.ptOPr->GetFrame(&tVideoDevice, &tVideoBuf);
+        if (iError)
+        {
+            DBG_PRINTF("GetFrame for %s error!\n", argv[1]);
+            return -1;
+        }
+        ptVideoBufCur = &tVideoBuf;
+
+        if (iPixelFormatOfVideo != iPixelFormatOfDisp)
+        {
+            /* 转换为RGB */
+            iError = ptVideoConvert->Convert(&tVideoBuf, &tConvertBuf);
+            DBG_PRINTF("Convert %s, ret = %d\n", ptVideoConvert->name, iError);
+            if (iError)
+            {
+                DBG_PRINTF("Convert for %s error!\n", argv[1]);
+                return -1;
+            }            
+            ptVideoBufCur = &tConvertBuf;
+        }
+        
+
+        /* 如果图像分辨率大于LCD, 缩放 */
+        if (ptVideoBufCur->tPixelDatas.iWidth > iLcdWidth || ptVideoBufCur->tPixelDatas.iHeight > iLcdHeigt)
+        {
+            /* 确定缩放后的分辨率 */
+            /* 把图片按比例缩放到VideoMem上, 居中显示
+             * 1. 先算出缩放后的大小
+             */
+            k = (float)ptVideoBufCur->tPixelDatas.iHeight / ptVideoBufCur->tPixelDatas.iWidth;
+            tZoomBuf.tPixelDatas.iWidth  = iLcdWidth;
+            tZoomBuf.tPixelDatas.iHeight = iLcdWidth * k;
+            if ( tZoomBuf.tPixelDatas.iHeight > iLcdHeigt)
+            {
+                tZoomBuf.tPixelDatas.iWidth  = iLcdHeigt / k;
+                tZoomBuf.tPixelDatas.iHeight = iLcdHeigt;
+            }
+            tZoomBuf.tPixelDatas.iBpp        = iLcdBpp;
+            tZoomBuf.tPixelDatas.iLineBytes  = tZoomBuf.tPixelDatas.iWidth * tZoomBuf.tPixelDatas.iBpp / 8;
+            tZoomBuf.tPixelDatas.iTotalBytes = tZoomBuf.tPixelDatas.iLineBytes * tZoomBuf.tPixelDatas.iHeight;
+
+            if (!tZoomBuf.tPixelDatas.aucPixelDatas)
+            {
+                tZoomBuf.tPixelDatas.aucPixelDatas = malloc(tZoomBuf.tPixelDatas.iTotalBytes);
+            }
+            
+            PicZoom(&ptVideoBufCur->tPixelDatas, &tZoomBuf.tPixelDatas);
+            ptVideoBufCur = &tZoomBuf;
+        }
+
+        /* 合并进framebuffer */
+        /* 接着算出居中显示时左上角坐标 */
+        iTopLeftX = (iLcdWidth - ptVideoBufCur->tPixelDatas.iWidth) / 2;
+        iTopLeftY = (iLcdHeigt - ptVideoBufCur->tPixelDatas.iHeight) / 2;
+
+        PicMerge(iTopLeftX, iTopLeftY, &ptVideoBufCur->tPixelDatas, &tFrameBuf.tPixelDatas);
+
+        FlushPixelDatasToDev(&tFrameBuf.tPixelDatas);
+
+        iError = tVideoDevice.ptOPr->PutFrame(&tVideoDevice, &tVideoBuf);
+        if (iError)
+        {
+            DBG_PRINTF("PutFrame for %s error!\n", argv[1]);
+            return -1;
+        }                    
+
+        /* 把framebuffer的数据刷到LCD上, 显示 */
+    }
+		
+	return 0;
 }
+
